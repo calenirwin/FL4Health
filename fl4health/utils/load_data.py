@@ -1,341 +1,78 @@
-import random
-import warnings
-from collections.abc import Callable
-from logging import INFO
+
+import os
+import json
 from pathlib import Path
+from PIL import Image
+from tqdm import tqdm
 
-import numpy as np
-import torch
 import torchvision.transforms as transforms
-from flwr.common.logger import log
-from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, MNIST, CocoDetection
-
-from fl4health.utils.dataset import TensorDataset
-from fl4health.utils.dataset_converter import DatasetConverter
-from fl4health.utils.msd_dataset_sources import get_msd_dataset_enum, msd_md5_hashes, msd_urls
-from fl4health.utils.sampler import LabelBasedSampler
-
-with warnings.catch_warnings():
-    # ignoring some annoying scipy deprecation warnings
-    warnings.simplefilter("ignore", category=DeprecationWarning)
-    from monai.apps.utils import download_and_extract
+from pycocotools.coco import COCO
 
 
-class ToNumpy:
-    def __call__(self, tensor: torch.Tensor) -> np.ndarray:
-        return tensor.numpy()
+def convert_coco_to_yolo(coco_json_path, images_dir, output_label_dir, output_image_dir, image_size=(640, 640)):
+    coco = COCO(coco_json_path)
+
+    os.makedirs(output_label_dir, exist_ok=True)
+    os.makedirs(output_image_dir, exist_ok=True)
+
+    img_ids = coco.getImgIds()
+    ann_ids = coco.getAnnIds()
+    cats = coco.loadCats(coco.getCatIds())
+    cat2label = {cat['id']: idx for idx, cat in enumerate(cats)}
+
+    for img_id in tqdm(img_ids, desc="Converting COCO to YOLO format"):
+        img_info = coco.loadImgs(img_id)[0]
+        file_name = img_info['file_name']
+        img_path = os.path.join(images_dir, file_name)
+
+        # Copy image to output directory and resize
+        image = Image.open(img_path).convert("RGB")
+        image = image.resize(image_size)
+        image.save(os.path.join(output_image_dir, file_name))
+
+        width, height = image_size
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        anns = coco.loadAnns(ann_ids)
+
+        yolo_labels = []
+        for ann in anns:
+            if ann.get("iscrowd", 0) == 1:
+                continue
+            x, y, w, h = ann['bbox']
+            x_center = (x + w / 2) / width
+            y_center = (y + h / 2) / height
+            w /= width
+            h /= height
+            class_id = cat2label[ann['category_id']]
+            yolo_labels.append(f"{class_id} {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}")
+
+        label_file = os.path.join(output_label_dir, file_name.replace('.jpg', '.txt').replace('.png', '.txt'))
+        with open(label_file, 'w') as f:
+            f.write("\n".join(yolo_labels))
 
 
-def split_data_and_targets(
-    data: torch.Tensor, targets: torch.Tensor, validation_proportion: float = 0.2, hash_key: int | None = None
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-
-    total_size = data.shape[0]
-    train_size = int(total_size * (1 - validation_proportion))
-    if hash_key is not None:
-        random.seed(hash_key)
-    train_indices = random.sample(range(total_size), train_size)
-    val_indices = [i for i in range(total_size) if i not in train_indices]
-    train_data, train_targets = data[train_indices], targets[train_indices]
-    val_data, val_targets = data[val_indices], targets[val_indices]
-    return train_data, train_targets, val_data, val_targets
-
-
-def get_mnist_data_and_target_tensors(data_dir: Path, train: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    mnist_dataset = MNIST(data_dir, train=train, download=True)
-    data = torch.Tensor(mnist_dataset.data)
-    targets = torch.Tensor(mnist_dataset.targets).long()
-    return data, targets
-
-
-def get_train_and_val_mnist_datasets(
-    data_dir: Path,
-    transform: Callable | None = None,
-    target_transform: Callable | None = None,
-    validation_proportion: float = 0.2,
-    hash_key: int | None = None,
-) -> tuple[TensorDataset, TensorDataset]:
-    data, targets = get_mnist_data_and_target_tensors(data_dir, True)
-
-    train_data, train_targets, val_data, val_targets = split_data_and_targets(
-        data, targets, validation_proportion, hash_key
-    )
-
-    training_set = TensorDataset(train_data, train_targets, transform=transform, target_transform=target_transform)
-    validation_set = TensorDataset(val_data, val_targets, transform=transform, target_transform=target_transform)
-    return training_set, validation_set
-
-
-def load_mnist_data(
-    data_dir: Path,
-    batch_size: int,
-    sampler: LabelBasedSampler | None = None,
-    transform: Callable | None = None,
-    target_transform: Callable | None = None,
-    dataset_converter: DatasetConverter | None = None,
-    validation_proportion: float = 0.2,
-    hash_key: int | None = None,
-) -> tuple[DataLoader, DataLoader, dict[str, int]]:
-    """
-    Load MNIST Dataset (training and validation set).
-
-    Args:
-        data_dir (Path): The path to the MNIST dataset locally. Dataset is downloaded to this location if it does
-            not already exist.
-        batch_size (int): The batch size to use for the train and validation dataloader.
-        sampler (LabelBasedSampler | None): Optional sampler to subsample dataset based on labels.
-        transform (Callable | None): Optional transform to be applied to input samples.
-        target_transform (Callable | None): Optional transform to be applied to targets.
-        dataset_converter (DatasetConverter | None): Optional dataset converter used to convert the input and/or
-            target of train and validation dataset.
-        validation_proportion (float): A float between 0 and 1 specifying the proportion of samples
-            to allocate to the validation dataset. Defaults to 0.2.
-        hash_key (int | None): Optional hash key to create a reproducible split for train and validation
-            datasets.
-
-    Returns:
-        tuple[DataLoader, DataLoader, dict[str, int]]: The train data loader, validation data loader and a dictionary
-        with the sample counts of datasets underpinning the respective data loaders.
-    """
-    log(INFO, f"Data directory: {str(data_dir)}")
-
-    if transform is None:
-        transform = transforms.Compose(
-            [
-                ToNumpy(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5), (0.5)),
-            ]
-        )
-    training_set, validation_set = get_train_and_val_mnist_datasets(
-        data_dir, transform, target_transform, validation_proportion, hash_key
-    )
-
-    if sampler is not None:
-        training_set = sampler.subsample(training_set)
-        validation_set = sampler.subsample(validation_set)
-
-    if dataset_converter is not None:
-        training_set = dataset_converter.convert_dataset(training_set)
-        validation_set = dataset_converter.convert_dataset(validation_set)
-
-    train_loader = DataLoader(training_set, batch_size=batch_size, shuffle=True)
-    validation_loader = DataLoader(validation_set, batch_size=batch_size)
-
-    num_examples = {"train_set": len(training_set), "validation_set": len(validation_set)}
-    return train_loader, validation_loader, num_examples
-
-
-def load_mnist_test_data(
-    data_dir: Path,
-    batch_size: int,
-    sampler: LabelBasedSampler | None = None,
-    transform: Callable | None = None,
-) -> tuple[DataLoader, dict[str, int]]:
-    """
-    Load MNIST Test Dataset.
-
-    Args:
-        data_dir (Path): The path to the MNIST dataset locally. Dataset is downloaded to this location if it does not
-            already exist.
-        batch_size (int): The batch size to use for the test dataloader.
-        sampler (LabelBasedSampler | None): Optional sampler to subsample dataset based on labels.
-        transform (Callable | None): Optional transform to be applied to input samples.
-
-    Returns:
-        tuple[DataLoader, dict[str, int]]: The test data loader and a dictionary containing the sample count
-            of the test dataset.
-    """
-    log(INFO, f"Data directory: {str(data_dir)}")
-
-    if transform is None:
-        transform = transforms.Compose(
-            [
-                ToNumpy(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5), (0.5)),
-            ]
-        )
-
-    data, targets = get_mnist_data_and_target_tensors(data_dir, False)
-    evaluation_set = TensorDataset(data, targets, transform)
-
-    if sampler is not None:
-        evaluation_set = sampler.subsample(evaluation_set)
-
-    evaluation_loader = DataLoader(evaluation_set, batch_size=batch_size, shuffle=False)
-    num_examples = {"eval_set": len(evaluation_set)}
-    return evaluation_loader, num_examples
-
-
-def get_cifar10_data_and_target_tensors(data_dir: Path, train: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    cifar_dataset = CIFAR10(data_dir, train=train, download=True)
-    data = torch.Tensor(cifar_dataset.data)
-    targets = torch.Tensor(cifar_dataset.targets).long()
-    return data, targets
-
-
-def get_train_and_val_cifar10_datasets(
-    data_dir: Path,
-    transform: Callable | None = None,
-    target_transform: Callable | None = None,
-    validation_proportion: float = 0.2,
-    hash_key: int | None = None,
-) -> tuple[TensorDataset, TensorDataset]:
-    data, targets = get_cifar10_data_and_target_tensors(data_dir, True)
-
-    train_data, train_targets, val_data, val_targets = split_data_and_targets(
-        data, targets, validation_proportion, hash_key
-    )
-
-    training_set = TensorDataset(train_data, train_targets, transform=transform, target_transform=target_transform)
-    validation_set = TensorDataset(val_data, val_targets, transform=transform, target_transform=target_transform)
-
-    return training_set, validation_set
-
-
-def load_cifar10_data(
-    data_dir: Path,
-    batch_size: int,
-    sampler: LabelBasedSampler | None = None,
-    validation_proportion: float = 0.2,
-    hash_key: int | None = None,
-) -> tuple[DataLoader, DataLoader, dict[str, int]]:
-    """
-    Load CIFAR10 Dataset (training and validation set).
-
-    Args:
-        data_dir (Path): The path to the CIFAR10 dataset locally. Dataset is downloaded to this location if it does
-            not already exist.
-        batch_size (int): The batch size to use for the train and validation dataloader.
-        sampler (LabelBasedSampler | None): Optional sampler to subsample dataset based on labels.
-        validation_proportion (float): A float between 0 and 1 specifying the proportion of samples to allocate to the
-            validation dataset. Defaults to 0.2.
-        hash_key (int | None): Optional hash key to create a reproducible split for train and validation
-            datasets.
-
-    Returns:
-        tuple[DataLoader, DataLoader, dict[str, int]]: The train data loader, validation data loader and a dictionary
-        with the sample counts of datasets underpinning the respective data loaders.
-    """
-    log(INFO, f"Data directory: {str(data_dir)}")
-
-    transform = transforms.Compose(
-        [
-            ToNumpy(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-    training_set, validation_set = get_train_and_val_cifar10_datasets(
-        data_dir, transform, None, validation_proportion, hash_key
-    )
-
-    if sampler is not None:
-        training_set = sampler.subsample(training_set)
-        validation_set = sampler.subsample(validation_set)
-
-    train_loader = DataLoader(training_set, batch_size=batch_size, shuffle=True)
-    validation_loader = DataLoader(validation_set, batch_size=batch_size)
-    num_examples = {
-        "train_set": len(training_set),
-        "validation_set": len(validation_set),
-    }
-    return train_loader, validation_loader, num_examples
-
-
-def load_cifar10_test_data(
-    data_dir: Path, batch_size: int, sampler: LabelBasedSampler | None = None
-) -> tuple[DataLoader, dict[str, int]]:
-    """
-    Load CIFAR10 Test Dataset.
-
-    Args:
-        data_dir (Path): The path to the CIFAR10 dataset locally. Dataset is downloaded to this location if it does
-            not already exist.
-        batch_size (int): The batch size to use for the test dataloader.
-        sampler (LabelBasedSampler | None): Optional sampler to subsample dataset based on labels.
-
-    Returns:
-        tuple[DataLoader, dict[str, int]]: The test data loader and a dictionary containing the sample count of the
-        test dataset.
-    """
-    log(INFO, f"Data directory: {str(data_dir)}")
-    transform = transforms.Compose(
-        [
-            ToNumpy(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-    data, targets = get_cifar10_data_and_target_tensors(data_dir, False)
-    evaluation_set = TensorDataset(data, targets, transform)
-
-    if sampler is not None:
-        evaluation_set = sampler.subsample(evaluation_set)
-
-    evaluation_loader = DataLoader(evaluation_set, batch_size=batch_size, shuffle=False)
-    num_examples = {"eval_set": len(evaluation_set)}
-    return evaluation_loader, num_examples
-
-
-def load_msd_dataset(data_path: str, msd_dataset_name: str) -> None:
-    """
-    Downloads and extracts one of the 10 Medical Segmentation Decathelon (MSD) datasets.
-
-    Args:
-        data_path (str): Path to the folder in which to extract the dataset. The data itself will be in a subfolder
-            named after the dataset, not in the ``data_path`` directory itself. The name of the folder will be the
-            name of the dataset as defined by the values of the ``MsdDataset`` enum returned by
-            ``get_msd_dataset_enum``
-        msd_dataset_name (str): One of the 10 msd datasets
-    """
-    msd_enum = get_msd_dataset_enum(msd_dataset_name)
-    msd_hash = msd_md5_hashes[msd_enum]
-    url = msd_urls[msd_enum]
-    download_and_extract(url=url, output_dir=data_path, hash_val=msd_hash, hash_type="md5", progress=True)
-
-
-def get_mscoco_dataloader(
-    data_path='/projects/federated_learning/Hitachi/MSCOCO2017', 
-    batch_size=16
+def prepare_yolo_dataset(
+    coco_root="/projects/federated_learning/Hitachi/MSCOCO2017",
+    yolo_output_root="data/coco_yolo",
+    image_size=(640, 640)
 ):
+    # Set paths
+    paths = {
+        "train_img_dir": f"{coco_root}/images/train2017",
+        "val_img_dir": f"{coco_root}/images/val2017",
+        "train_ann": f"{coco_root}/annotations/instances_train2017.json",
+        "val_ann": f"{coco_root}/annotations/instances_val2017.json",
+        "yolo_train_img": f"{yolo_output_root}/images/train2017",
+        "yolo_val_img": f"{yolo_output_root}/images/val2017",
+        "yolo_train_lbl": f"{yolo_output_root}/labels/train2017",
+        "yolo_val_lbl": f"{yolo_output_root}/labels/val2017",
+    }
 
-    # Define standard transformations for the dataset
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize images to a standard size
-        transforms.ToTensor(),          
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
-    
-    # Load MSCOCO2017 dataset from the location provided in Vector cluster
-    # Note: torchvision.datasets.CocoDetection is used for object detection tasks
-    train_dataset = CocoDetection(
-        root=f'{data_path}/images/train2017',
-        annFile=f'{data_path}/annotations/instances_train2017.json',
-        transform=transform
-    )
+    convert_coco_to_yolo(paths["train_ann"], paths["train_img_dir"], paths["yolo_train_lbl"], paths["yolo_train_img"], image_size)
+    convert_coco_to_yolo(paths["val_ann"], paths["val_img_dir"], paths["yolo_val_lbl"], paths["yolo_val_img"], image_size)
 
-    val_dataset = CocoDetection(
-        root=f'{data_path}/images/val2017',
-        annFile=f'{data_path}/annotations/instances_val2017.json',
-        transform=transform
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-    )
+    print("✅ YOLOv5 dataset prepared!")
 
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-    )
-    
-    return train_loader, val_loader
+
+if __name__ == "__main__":
+    prepare_yolo_dataset()
