@@ -9,7 +9,7 @@ import torch
 import torchvision.transforms as transforms
 from flwr.common.logger import log
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, MNIST
+from torchvision.datasets import CIFAR10, MNIST, CocoDetection
 
 from fl4health.utils.dataset import TensorDataset
 from fl4health.utils.dataset_converter import DatasetConverter
@@ -295,3 +295,47 @@ def load_msd_dataset(data_path: str, msd_dataset_name: str) -> None:
     msd_hash = msd_md5_hashes[msd_enum]
     url = msd_urls[msd_enum]
     download_and_extract(url=url, output_dir=data_path, hash_val=msd_hash, hash_type="md5", progress=True)
+
+
+def get_mscoco_dataloader(
+    data_path='/projects/federated_learning/Hitachi/MSCOCO2017', 
+    batch_size=16
+):
+
+    # Define standard transformations for the dataset
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Resize images to a standard size
+        transforms.ToTensor(),          
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+    
+    # Load MSCOCO2017 dataset from the location provided in Vector cluster
+    # Note: torchvision.datasets.CocoDetection is used for object detection tasks
+    train_dataset = CocoDetection(
+        root=f'{data_path}/images/train2017',
+        annFile=f'{data_path}/annotations/instances_train2017.json',
+        transform=transform
+    )
+
+    val_dataset = CocoDetection(
+        root=f'{data_path}/images/val2017',
+        annFile=f'{data_path}/annotations/instances_val2017.json',
+        transform=transform
+    )
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    
+    return train_loader, val_loader
