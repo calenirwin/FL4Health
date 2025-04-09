@@ -1,4 +1,5 @@
 import os
+import torch
 from ultralytics import YOLO
 from flwr.common.typing import Config
 from torch.utils.data import DataLoader
@@ -34,7 +35,10 @@ def train_yolov5(config_path, epochs=100, batch_size=16, img_size=640, weights='
 
 # Example usage:
 if __name__ == "__main__":
-    config_path = "~/FL4Health/examples/yolov5_centralized_example/coco.yaml"
+    SAVE = True
+
+    config_path = "examples/yolov5_centralized_example/coco.yaml"
+    save_path = "examples/yolov5_centralized_example/yolov5_coco.pt"
 
 
     model, results = train_yolov5(
@@ -44,6 +48,9 @@ if __name__ == "__main__":
         img_size=640,
         weights='yolov5s.pt'  # Use 'yolov5s.pt', 'yolov5m.pt', 'yolov5l.pt', or 'yolov5x.pt'
     )
+
+    if SAVE:
+        model.save(save_path)
     
     # Evaluate model on validation set
     val_results = model.val()

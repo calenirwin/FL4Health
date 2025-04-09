@@ -178,3 +178,5 @@ settings.json
 # dev
 temp*.py
 tmp*.py
+
+/external/

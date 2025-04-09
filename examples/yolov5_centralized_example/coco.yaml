@@ -1,24 +1,7 @@
-# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+path: /projects/federated_learning/Hitachi/MSCOCO2017
 
-# COCO128 dataset https://www.kaggle.com/datasets/ultralytics/coco128 (first 128 images from COCO train2017) by Ultralytics
-# Example usage: python train.py --data coco128.yaml
-# parent
-# ├── yolov5
-# └── datasets
-#     └── coco128  ← downloads here (7 MB)
-
-# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
-path: /projects/federated_learning/Hitachi/MSCOCO2017 # dataset root dir
-train: train2017 # train images (relative to 'path') 128 images
-val: val2017 # val images (relative to 'path') 128 images
-test: test2017 # test images (optional)
-
-train: 
-  - /projects/federated_learning/Hitachi/MSCOCO2017/train2017  # train images
-  - /projects/federated_learning/Hitachi/COCO_YOLO_Labels/labels/train2017  # train labels
-val: 
-  - /projects/federated_learning/Hitachi/MSCOCO2017/val2017  # val images
-  - /projects/federated_learning/Hitachi/COCO_YOLO_Labels/labels/val2017  # val labels
+train: images/train2017
+val: images/val2017
 
 # Classes
 nc: 80 # number of classes
@@ -30,7 +13,7 @@ names:
   4: airplane
   5: bus
   6: train
-  7: truck
+  7: truck 
   8: boat
   9: traffic light
   10: fire hydrant
@@ -103,6 +86,3 @@ names:
   77: teddy bear
   78: hair drier
   79: toothbrush
-
-# Download script/URL (optional)
-# download: https://github.com/ultralytics/assets/releases/download/v0.0.0/coco128.zip

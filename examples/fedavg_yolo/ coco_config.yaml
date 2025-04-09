@@ -1,0 +1,31 @@
+# Parameters that describe server
+n_server_rounds: 3 # The number of rounds to run FL
+
+# Parameters that describe clients
+n_clients: 2 # The number of clients in the FL experiment
+local_epochs: 3 # The number of epochs to complete for client
+batch_size: 32 # The batch size for client training
+
+# Model Hyperparameters
+learning_rate: 0.01
+weight_decay: 0.0005
+momentum: 0.937
+
+# Model checkpointing
+checkpoint_path: examples/fedavg_yolo
+
+# Basemodel weights
+model_path: examples/fedavg_yolo/yolo_weights/yolov5su.pt
+
+nc: 10 # number of classes
+names:
+  0: person
+  1: bicycle
+  2: car
+  3: motorcycle
+  4: airplane
+  5: bus
+  6: train
+  7: truck 
+  8: boat
+  9: traffic light
